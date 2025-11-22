@@ -20,7 +20,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@hikari-systems/hs.utils": "^0.0.55",
+    "@hikari-systems/hs.utils": "^0.0.56",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
