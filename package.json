@@ -1,0 +1,35 @@
+{
+  "name": "@hikari-systems/image-service-mcp",
+  "version": "0.0.1",
+  "description": "An Image Service MCP server",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "image-service-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js http://localhost:3002",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "server"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hikari-systems/hs.utils": "^0.0.56",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
