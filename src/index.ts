@@ -3,10 +3,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { config, logging } from "@hikari-systems/hs.utils";
+import { config } from "@hikari-systems/hs.utils";
 import { readFile } from "node:fs/promises";
 
-const log = logging("main");
+// Create a logger that writes to stderr instead of stdout
+// MCP servers must only output JSON-RPC messages to stdout
+const log = {
+  info: (...args: unknown[]) => {
+    console.error(`[INFO]`, ...args);
+  },
+  error: (...args: unknown[]) => {
+    console.error(`[ERROR]`, ...args);
+  },
+  debug: (...args: unknown[]) => {
+    console.error(`[DEBUG]`, ...args);
+  },
+  warn: (...args: unknown[]) => {
+    console.error(`[WARN]`, ...args);
+  },
+};
 const { configString } = config;
 
 /**
