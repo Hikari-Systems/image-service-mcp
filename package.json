@@ -18,7 +18,7 @@
     "server"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@hikari-systems/hs.utils": "^0.0.56",
     "@modelcontextprotocol/sdk": "^1.0.0"
@@ -32,4 +32,3 @@
     "node": ">=18.0.0"
   }
 }
-

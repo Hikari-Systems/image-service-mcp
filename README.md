@@ -337,4 +337,4 @@ Uploads an image file and immediately resizes it. Takes an image category and a 
 
 ## License
 
-MIT
+Apache-2.0
