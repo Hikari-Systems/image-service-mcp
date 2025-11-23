@@ -100,10 +100,6 @@ async function main() {
     return response;
   };
 
-  // Cache for categories (loaded on startup)
-  let sizeCache: Record<string, CategorySize> | undefined;
-  let lastUpdatedAt: number | undefined;
-
   // Fetch and cache categories on startup
   const getCategories = async (): Promise<Category[] | null> => {
     try {
@@ -138,10 +134,36 @@ async function main() {
     }
   };
 
-  const buildImageMetadataResponseText = (
+  // Cache for categories (loaded on startup)
+  let sizeCache: Record<string, CategorySize> | undefined;
+  let lastUpdatedAt: number | undefined;
+  let lastAccessedAt: number | undefined;
+
+  // Internal method to get size cache with automatic refresh
+  const getSizeCache = async (): Promise<
+    Record<string, CategorySize> | undefined
+  > => {
+    const fiveMinutesInMs = 5 * 60 * 1000;
+    const now = Date.now();
+
+    // Check if cache is falsey or was last accessed more than 5 mins ago
+    if (
+      !sizeCache ||
+      !lastAccessedAt ||
+      now - lastAccessedAt > fiveMinutesInMs
+    ) {
+      log.info("Size cache is stale or missing, reloading...");
+      await getCategories();
+    }
+
+    lastAccessedAt = Date.now();
+    return sizeCache;
+  };
+
+  const buildImageMetadataResponseText = async (
     metadata: ImageMetadata,
     label: string
-  ): string => {
+  ): Promise<string> => {
     // Format the response in a more readable way for LLMs
     let formattedText = `## ${label}\n\n`;
 
@@ -153,8 +175,9 @@ async function main() {
       formattedText += `**Available Sizes:**\n\n`;
 
       // Match resizedFiles with cached size dimensions
+      const cache = await getSizeCache();
       for (const resizedFile of metadata.resizedFiles) {
-        const sizeInfo = sizeCache?.[resizedFile.size];
+        const sizeInfo = cache?.[resizedFile.size];
         if (sizeInfo) {
           formattedText += `- **${resizedFile.size}**: ${sizeInfo.width}×${sizeInfo.height} pixels\n`;
         } else {
@@ -192,7 +215,7 @@ async function main() {
         }
 
         const metadata = (await response.json()) as ImageMetadata;
-        const formattedText = buildImageMetadataResponseText(
+        const formattedText = await buildImageMetadataResponseText(
           metadata,
           "Image Metadata"
         );
@@ -262,8 +285,9 @@ async function main() {
           formattedText += `**Available Sizes:**\n\n`;
 
           // Match resizedFiles with cached size dimensions
+          const cache = await getSizeCache();
           for (const resizedFile of metadata.resizedFiles) {
-            const sizeInfo = sizeCache?.[resizedFile.size];
+            const sizeInfo = cache?.[resizedFile.size];
             if (sizeInfo) {
               formattedText += `- **${resizedFile.size}**: ${sizeInfo.width}×${sizeInfo.height} pixels\n`;
             } else {
@@ -543,7 +567,7 @@ async function main() {
           content: [
             {
               type: "text",
-              text: buildImageMetadataResponseText(
+              text: await buildImageMetadataResponseText(
                 metadata,
                 "Image uploaded and resized"
               ),
@@ -590,7 +614,10 @@ async function main() {
           content: [
             {
               type: "text",
-              text: buildImageMetadataResponseText(metadata, "Image uploaded"),
+              text: await buildImageMetadataResponseText(
+                metadata,
+                "Image uploaded"
+              ),
             },
           ],
         };
