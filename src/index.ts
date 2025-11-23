@@ -24,6 +24,32 @@ const log = {
 };
 const { configString } = config;
 
+// Interface definitions for API responses
+interface ResizedFile {
+  size: string;
+  s3Path: string;
+}
+
+interface ImageMetadata {
+  id: string;
+  category: string;
+  downloadedS3Path?: string;
+  originalS3Path?: string;
+  resizedFiles?: ResizedFile[];
+}
+
+interface CategorySize {
+  name: string;
+  width: number;
+  height: number;
+  mimeType: string;
+}
+
+interface Category {
+  name: string;
+  sizes: CategorySize[];
+}
+
 /**
  * Image Service MCP Server
  * A simple MCP server that demonstrates basic functionality
@@ -74,159 +100,192 @@ async function main() {
     return response;
   };
 
+  // Cache for categories (loaded on startup)
+  let sizeCache: Record<string, CategorySize> | undefined;
+  let lastUpdatedAt: number | undefined;
+
+  // Fetch and cache categories on startup
+  const getCategories = async (): Promise<Category[] | null> => {
+    try {
+      log.info("Loading size cache on startup...");
+      const response = await makeApiCall(`/api/size/list`);
+      if (!response.ok) {
+        log.warn(
+          `Failed to load size cache: ${response.status} ${response.statusText}`
+        );
+        return null;
+      }
+
+      const categories = (await response.json()) as Category[];
+      const localSizeCache: Record<string, CategorySize> = {};
+
+      for (const category of categories) {
+        if (category && category.name && Array.isArray(category.sizes)) {
+          for (const size of category.sizes) {
+            localSizeCache[size.name] = size;
+          }
+        }
+      }
+      log.info(
+        `Size cache loaded: ${Object.keys(localSizeCache).length} sizes`
+      );
+      sizeCache = localSizeCache;
+      lastUpdatedAt = Date.now();
+      return categories;
+    } catch (error) {
+      log.warn(`Error loading size cache: ${error}`);
+      return null;
+    }
+  };
+
+  const buildImageMetadataResponseText = (
+    metadata: ImageMetadata,
+    label: string
+  ): string => {
+    // Format the response in a more readable way for LLMs
+    let formattedText = `## ${label}\n\n`;
+
+    formattedText += `**Image ID:** ${metadata.id}\n\n`;
+    formattedText += `**Category:** ${metadata.category}\n\n`;
+
+    // Get available sizes using resizedFiles from metadata and size cache
+    if (metadata.resizedFiles && metadata.resizedFiles.length > 0) {
+      formattedText += `**Available Sizes:**\n\n`;
+
+      // Match resizedFiles with cached size dimensions
+      for (const resizedFile of metadata.resizedFiles) {
+        const sizeInfo = sizeCache?.[resizedFile.size];
+        if (sizeInfo) {
+          formattedText += `- **${resizedFile.size}**: ${sizeInfo.width}×${sizeInfo.height} pixels\n`;
+        } else {
+          // Size not found in cache, show without dimensions
+          formattedText += `- **${resizedFile.size}**\n`;
+        }
+      }
+      formattedText += "\n";
+    } else {
+      formattedText += `*Note: No resized files available for this image.*\n\n`;
+    }
+
+    return formattedText;
+  };
+
   // Register get_image_metadata tool
   server.registerTool(
     "get_image_metadata",
     {
       description: "Gets metadata for an image by its UUID",
       inputSchema: z.object({
-        uuid: z.string().describe("The image service UUID"),
+        imageServiceId: z.string().describe("The image service ID"),
       }),
     },
-    async (args) => {
+    async (args: { imageServiceId: string }) => {
       try {
-        log.info(`get_image_metadata called with uuid: ${args.uuid}`);
-        const response = await makeApiCall(`/api/image/${args.uuid}`);
-        const responseText = await response.text();
-        log.debug(`Response body (raw): ${responseText.substring(0, 500)}`);
+        log.info(`get_image_metadata called with uuid: ${args.imageServiceId}`);
+        const response = await makeApiCall(`/api/image/${args.imageServiceId}`);
 
         if (!response.ok) {
-          // Try to parse error response as JSON for better error messages
-          let errorMessage = responseText;
-          const contentType = response.headers.get("content-type") || "";
-
-          if (contentType.includes("application/json")) {
-            try {
-              const errorData = JSON.parse(responseText);
-              log.error(
-                `Failed to get image metadata: ${response.status}`,
-                errorData
-              );
-              errorMessage =
-                typeof errorData === "object" &&
-                errorData !== null &&
-                "error" in errorData
-                  ? JSON.stringify(errorData, null, 2)
-                  : responseText;
-            } catch (parseError) {
-              log.error(
-                `Failed to parse JSON error response: ${parseError}`,
-                responseText.substring(0, 500)
-              );
-            }
-          } else if (contentType.includes("text/html")) {
-            // Extract error message from HTML if possible
-            const errorMatch = responseText.match(/<pre>(.*?)<\/pre>/s);
-            if (errorMatch) {
-              const htmlError = errorMatch[1]
-                .replace(/<br\s*\/?>/g, "\n")
-                .replace(/&nbsp;/g, " ")
-                .replace(/&#39;/g, "'")
-                .trim();
-              log.error(
-                `Failed to get image metadata: ${response.status} (HTML response)`,
-                htmlError
-              );
-              errorMessage = `Server error: ${htmlError}`;
-            } else {
-              log.error(
-                `Failed to get image metadata: ${response.status} (HTML response)`,
-                responseText.substring(0, 500)
-              );
-              errorMessage = `Server returned HTML error page (${response.status})`;
-            }
-          } else {
-            log.error(
-              `Failed to get image metadata: ${response.status}`,
-              responseText.substring(0, 500)
-            );
-          }
+          const responseText = await response.text();
           throw new Error(
-            `Failed to get image metadata: ${response.status} ${errorMessage}`
+            `Failed to get image metadata: ${response.status} ${responseText}`
           );
         }
 
-        let data: unknown;
-        try {
-          data = JSON.parse(responseText);
-          log.debug(`Parsed response data:`, data);
-        } catch (parseError) {
-          log.error(`Failed to parse JSON response: ${parseError}`);
-          log.error(`Response text was: ${responseText}`);
-          throw new Error(
-            `Invalid JSON response: ${responseText.substring(0, 200)}`
-          );
-        }
+        const metadata = (await response.json()) as ImageMetadata;
+        const formattedText = buildImageMetadataResponseText(
+          metadata,
+          "Image Metadata"
+        );
 
-        // Format the response in a more readable way for LLMs
-        if (typeof data === "object" && data !== null) {
-          const metadata = data as Record<string, unknown>;
-          let formattedText = "## Image Metadata\n\n";
-
-          // Extract and format key fields
-          if (metadata.id) {
-            formattedText += `**Image ID:** ${metadata.id}\n\n`;
-          }
-
-          if (metadata.category) {
-            formattedText += `**Category:** ${metadata.category}\n\n`;
-          }
-
-          if (metadata.downloadedS3Path) {
-            formattedText += `**S3 Path:** ${metadata.downloadedS3Path}\n\n`;
-          }
-
-          if (metadata.originalFileUrl) {
-            formattedText += `**Original Image URL:** ${metadata.originalFileUrl}\n\n`;
-            formattedText += `> This is a signed URL that can be used to access the original image. The URL includes authentication parameters and may expire.\n\n`;
-          }
-
-          // Add any additional fields
-          const additionalFields: string[] = [];
-          for (const [key, value] of Object.entries(metadata)) {
-            if (
-              ![
-                "id",
-                "category",
-                "downloadedS3Path",
-                "originalFileUrl",
-              ].includes(key)
-            ) {
-              additionalFields.push(`- **${key}:** ${JSON.stringify(value)}`);
-            }
-          }
-
-          if (additionalFields.length > 0) {
-            formattedText += "**Additional Information:**\n";
-            formattedText += additionalFields.join("\n") + "\n\n";
-          }
-
-          // Add raw JSON for reference
-          formattedText += "---\n\n**Raw JSON Response:**\n```json\n";
-          formattedText += JSON.stringify(data, null, 2);
-          formattedText += "\n```";
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: formattedText,
-              },
-            ],
-          };
-        }
-
-        // Fallback to JSON if data structure is unexpected
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(data, null, 2),
+              text: formattedText,
             },
           ],
         };
       } catch (error) {
         log.error(`Error in get_image_metadata:`, error);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // Register transcode_image tool
+  server.registerTool(
+    "transcode_image",
+    {
+      description:
+        "Transcodes an image by its UUID. This triggers the transcoding process and returns the updated image metadata.",
+      inputSchema: z.object({
+        imageServiceId: z.string().describe("The image service ID"),
+      }),
+    },
+    async (args: { imageServiceId: string }) => {
+      try {
+        log.info(`transcode_image called with uuid: ${args.imageServiceId}`);
+        const response = await makeApiCall(
+          `/api/image/${args.imageServiceId}/transcode`,
+          {
+            method: "POST",
+          }
+        );
+
+        if (!response.ok) {
+          const responseText = await response.text();
+          throw new Error(
+            `Failed to transcode image: ${response.status} ${responseText}`
+          );
+        }
+
+        const metadata = (await response.json()) as ImageMetadata;
+
+        // Format the response in a more readable way for LLMs
+        let formattedText = "## Image Transcode Result\n\n";
+
+        formattedText += `**Image ID:** ${metadata.id}\n\n`;
+        formattedText += `**Category:** ${metadata.category}\n\n`;
+
+        // Get available sizes using resizedFiles from metadata and size cache
+        if (metadata.resizedFiles && metadata.resizedFiles.length > 0) {
+          formattedText += `**Available Sizes:**\n\n`;
+
+          // Match resizedFiles with cached size dimensions
+          for (const resizedFile of metadata.resizedFiles) {
+            const sizeInfo = sizeCache?.[resizedFile.size];
+            if (sizeInfo) {
+              formattedText += `- **${resizedFile.size}**: ${sizeInfo.width}×${sizeInfo.height} pixels\n`;
+            } else {
+              // Size not found in cache, show without dimensions
+              formattedText += `- **${resizedFile.size}**\n`;
+            }
+          }
+          formattedText += "\n";
+        } else {
+          formattedText += `*Note: No resized files available for this image.*\n\n`;
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: formattedText,
+            },
+          ],
+        };
+      } catch (error) {
+        log.error(`Error in transcode_image:`, error);
         return {
           content: [
             {
@@ -250,124 +309,43 @@ async function main() {
         "Lists all available image categories and their supported sizes. This helps determine what categories can be used when uploading images and what size options are available.",
       inputSchema: z.object({}),
     },
-    async (args) => {
+    async (): Promise<any> => {
       try {
         log.info(`list_categories called`);
-        const response = await makeApiCall(`/api/category/list`);
-        const responseText = await response.text();
-        log.debug(`Response body (raw): ${responseText.substring(0, 500)}`);
-
-        if (!response.ok) {
-          // Try to parse error response as JSON for better error messages
-          let errorMessage = responseText;
-          const contentType = response.headers.get("content-type") || "";
-
-          if (contentType.includes("application/json")) {
-            try {
-              const errorData = JSON.parse(responseText);
-              log.error(
-                `Failed to list categories: ${response.status}`,
-                errorData
-              );
-              errorMessage =
-                typeof errorData === "object" &&
-                errorData !== null &&
-                "error" in errorData
-                  ? JSON.stringify(errorData, null, 2)
-                  : responseText;
-            } catch (parseError) {
-              log.error(
-                `Failed to parse JSON error response: ${parseError}`,
-                responseText.substring(0, 500)
-              );
-            }
-          } else if (contentType.includes("text/html")) {
-            // Extract error message from HTML if possible
-            const errorMatch = responseText.match(/<pre>(.*?)<\/pre>/s);
-            if (errorMatch) {
-              const htmlError = errorMatch[1]
-                .replace(/<br\s*\/?>/g, "\n")
-                .replace(/&nbsp;/g, " ")
-                .replace(/&#39;/g, "'")
-                .trim();
-              log.error(
-                `Failed to list categories: ${response.status} (HTML response)`,
-                htmlError
-              );
-              errorMessage = `Server error: ${htmlError}`;
-            } else {
-              log.error(
-                `Failed to list categories: ${response.status} (HTML response)`,
-                responseText.substring(0, 500)
-              );
-              errorMessage = `Server returned HTML error page (${response.status})`;
-            }
-          } else {
-            log.error(
-              `Failed to list categories: ${response.status}`,
-              responseText.substring(0, 500)
-            );
-          }
-          throw new Error(
-            `Failed to list categories: ${response.status} ${errorMessage}`
-          );
+        const categories: Category[] | null = await getCategories();
+        if (categories === null) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No categories are currently available.",
+              },
+            ],
+          };
         }
+        let formattedText = `Found ${categories.length} categor${
+          categories.length === 1 ? "y" : "ies"
+        }:\n\n`;
 
-        let data: unknown;
-        try {
-          data = JSON.parse(responseText);
-          log.debug(`Parsed response data:`, data);
-        } catch (parseError) {
-          log.error(`Failed to parse JSON response: ${parseError}`);
-          log.error(`Response text was: ${responseText}`);
-          throw new Error(
-            `Invalid JSON response: ${responseText.substring(0, 200)}`
-          );
-        }
+        for (const category of categories) {
+          if (category !== null) {
+            formattedText += `### ${category.name || "Unknown"}\n\n`;
 
-        // Format the response in a more readable way for LLMs
-        if (Array.isArray(data)) {
-          let formattedText = "## Available Image Categories\n\n";
+            if (category.sizes.length > 0) {
+              formattedText += `**Available Sizes:**\n\n`;
 
-          if (data.length === 0) {
-            formattedText += "No categories are currently available.\n\n";
-          } else {
-            formattedText += `Found ${data.length} categor${
-              data.length === 1 ? "y" : "ies"
-            }:\n\n`;
-
-            for (const category of data) {
-              if (typeof category === "object" && category !== null) {
-                const cat = category as Record<string, unknown>;
-                const name = cat.name || "Unknown";
-                formattedText += `### ${name}\n\n`;
-
-                if (Array.isArray(cat.sizes) && cat.sizes.length > 0) {
-                  formattedText += `**Available Sizes:**\n\n`;
-
-                  for (const size of cat.sizes) {
-                    if (typeof size === "object" && size !== null) {
-                      const sizeObj = size as Record<string, unknown>;
-                      const sizeName = sizeObj.name || "Unknown";
-                      const width = sizeObj.width || "?";
-                      const height = sizeObj.height || "?";
-                      const mimeType = sizeObj.mimeType || "Unknown";
-
-                      formattedText += `- **${sizeName}**: ${width}×${height} pixels (${mimeType})\n`;
-                    }
-                  }
-                  formattedText += "\n";
-                } else {
-                  formattedText += "No sizes configured for this category.\n\n";
-                }
+              for (const size of category.sizes) {
+                formattedText += `- **${size.name || "Unknown"}**: ${
+                  size.width || "?"
+                }×${size.height || "?"} pixels (${
+                  size.mimeType || "Unknown"
+                })\n`;
               }
+              formattedText += "\n";
+            } else {
+              formattedText += "No sizes configured for this category.\n\n";
             }
           }
-
-          // Add raw JSON for reference
-          formattedText += "---\n\n**Raw JSON Response:**\n```json\n";
-          formattedText += JSON.stringify(data, null, 2);
-          formattedText += "\n```";
 
           return {
             content: [
@@ -378,16 +356,6 @@ async function main() {
             ],
           };
         }
-
-        // Fallback to JSON if data structure is unexpected
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(data, null, 2),
-            },
-          ],
-        };
       } catch (error) {
         log.error(`Error in list_categories:`, error);
         return {
@@ -412,7 +380,7 @@ async function main() {
       description:
         "Gets a URL for downloading an image at a specific size. Returns a URL from which the image can be downloaded.",
       inputSchema: z.object({
-        uuid: z.string().describe("The image service UUID"),
+        imageServiceId: z.string().describe("The image service ID"),
         size: z
           .string()
           .describe(
@@ -420,119 +388,34 @@ async function main() {
           ),
       }),
     },
-    async (args) => {
+    async (args: { imageServiceId: string; size: string }) => {
       try {
         log.info(
-          `get_resized_image called with uuid: ${args.uuid}, size: ${args.size}`
+          `get_resized_image called with imageServiceId: ${args.imageServiceId}, size: ${args.size}`
         );
         const response = await makeApiCall(
-          `/api/image/s/${args.uuid}/${args.size}`
+          `/api/image/s/${args.imageServiceId}/${args.size}`
         );
-        const responseText = await response.text();
-        log.debug(`Response body (raw): ${responseText.substring(0, 500)}`);
 
         if (!response.ok) {
-          // Try to parse error response as JSON for better error messages
-          let errorMessage = responseText;
-          const contentType = response.headers.get("content-type") || "";
-
-          if (contentType.includes("application/json")) {
-            try {
-              const errorData = JSON.parse(responseText);
-              log.error(
-                `Failed to get resized image URL: ${response.status}`,
-                errorData
-              );
-              errorMessage =
-                typeof errorData === "object" &&
-                errorData !== null &&
-                "error" in errorData
-                  ? JSON.stringify(errorData, null, 2)
-                  : responseText;
-            } catch (parseError) {
-              log.error(
-                `Failed to parse JSON error response: ${parseError}`,
-                responseText.substring(0, 500)
-              );
-            }
-          } else if (contentType.includes("text/html")) {
-            // Extract error message from HTML if possible
-            const errorMatch = responseText.match(/<pre>(.*?)<\/pre>/s);
-            if (errorMatch) {
-              const htmlError = errorMatch[1]
-                .replace(/<br\s*\/?>/g, "\n")
-                .replace(/&nbsp;/g, " ")
-                .replace(/&#39;/g, "'")
-                .trim();
-              log.error(
-                `Failed to get resized image URL: ${response.status} (HTML response)`,
-                htmlError
-              );
-              errorMessage = `Server error: ${htmlError}`;
-            } else {
-              log.error(
-                `Failed to get resized image URL: ${response.status} (HTML response)`,
-                responseText.substring(0, 500)
-              );
-              errorMessage = `Server returned HTML error page (${response.status})`;
-            }
-          } else {
-            log.error(
-              `Failed to get resized image URL: ${response.status}`,
-              responseText.substring(0, 500)
-            );
-          }
+          const responseText = await response.text();
           throw new Error(
-            `Failed to get resized image URL: ${response.status} ${errorMessage}`
+            `Failed to get resized image URL: ${response.status} ${responseText}`
           );
         }
 
-        let data: { url?: string } | unknown;
-        try {
-          data = JSON.parse(responseText);
-          log.debug(`Parsed response data:`, data);
-        } catch (parseError) {
-          log.error(`Failed to parse JSON response: ${parseError}`);
-          log.error(`Response text was: ${responseText}`);
-          throw new Error(
-            `Invalid JSON response: ${responseText.substring(0, 200)}`
-          );
-        }
+        const parsedResponse = (await response.json()) as { url?: string };
 
         // Format the response in a more readable way for LLMs
-        if (typeof data === "object" && data !== null) {
-          const responseData = data as Record<string, unknown>;
-          const url =
-            "url" in responseData && typeof responseData.url === "string"
-              ? responseData.url
-              : null;
+        if (parsedResponse && parsedResponse.url) {
+          log.info(`Extracted URL: ${parsedResponse.url || "null"}`);
 
-          log.info(`Extracted URL: ${url || "null"}`);
-
-          if (url) {
+          if (parsedResponse.url) {
             let formattedText = "## Resized Image URL\n\n";
-            formattedText += `**Image UUID:** ${args.uuid}\n\n`;
+            formattedText += `**Image UUID:** ${args.imageServiceId}\n\n`;
             formattedText += `**Requested Size:** ${args.size}\n\n`;
-            formattedText += `**Download URL:** ${url}\n\n`;
+            formattedText += `**Download URL:** ${parsedResponse.url}\n\n`;
             formattedText += `> This is a signed URL that can be used to download the image at the requested size. The URL includes authentication parameters and may expire.\n\n`;
-
-            // Add any additional fields from the response
-            const additionalFields: string[] = [];
-            for (const [key, value] of Object.entries(responseData)) {
-              if (key !== "url") {
-                additionalFields.push(`- **${key}:** ${JSON.stringify(value)}`);
-              }
-            }
-
-            if (additionalFields.length > 0) {
-              formattedText += "**Additional Information:**\n";
-              formattedText += additionalFields.join("\n") + "\n\n";
-            }
-
-            // Add raw JSON for reference
-            formattedText += "---\n\n**Raw JSON Response:**\n```json\n";
-            formattedText += JSON.stringify(data, null, 2);
-            formattedText += "\n```";
 
             return {
               content: [
@@ -542,25 +425,24 @@ async function main() {
                 },
               ],
             };
-          } else {
-            // URL not found in response, return formatted error message
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `## Resized Image URL\n\n**Warning:** No URL found in the response.\n\n**Image UUID:** ${
-                    args.uuid
-                  }\n**Requested Size:** ${
-                    args.size
-                  }\n\n**Response Data:**\n\`\`\`json\n${JSON.stringify(
-                    data,
-                    null,
-                    2
-                  )}\n\`\`\``,
-                },
-              ],
-            };
           }
+          // URL not found in response, return formatted error message
+          return {
+            content: [
+              {
+                type: "text",
+                text: `## Resized Image URL\n\n**Warning:** No URL found in the response.\n\n**Image UUID:** ${
+                  args.imageServiceId
+                }\n**Requested Size:** ${
+                  args.size
+                }\n\n**Response Data:**\n\`\`\`json\n${JSON.stringify(
+                  parsedResponse,
+                  null,
+                  2
+                )}\n\`\`\``,
+              },
+            ],
+          };
         }
 
         // Fallback to JSON if data structure is unexpected
@@ -568,7 +450,7 @@ async function main() {
           content: [
             {
               type: "text",
-              text: JSON.stringify(data, null, 2),
+              text: JSON.stringify(parsedResponse, null, 2),
             },
           ],
         };
@@ -589,6 +471,55 @@ async function main() {
     }
   );
 
+  // Common function for uploading images
+  const uploadImage = async (
+    category: string,
+    filename: string,
+    resize: boolean
+  ): Promise<ImageMetadata> => {
+    // Read the file
+    const fileBuffer = await readFile(filename);
+    const fileName = filename.split("/").pop() || "image";
+    log.debug(`Read file: ${fileName}, size: ${fileBuffer.length} bytes`);
+
+    // Create FormData for multipart upload
+    const formData = new FormData();
+    const blob = new Blob([fileBuffer], {
+      type: "application/octet-stream",
+    });
+    formData.append("image", blob, fileName);
+    log.debug(`Created FormData with file: ${fileName}`);
+
+    // Make the API call
+    const response = await makeApiCall(
+      `/api/image/${category}?forceImmediateResize=${resize}`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new Error(
+        `Failed to upload image: ${response.status} ${responseText}`
+      );
+    }
+
+    const imageMetadata = (await response.json()) as ImageMetadata;
+
+    if (!imageMetadata.id || !imageMetadata.category) {
+      throw new Error(
+        `Invalid response format: missing required fields. Response: ${JSON.stringify(
+          imageMetadata
+        )}`
+      );
+    }
+
+    log.info(`Successfully uploaded image, response:`, imageMetadata);
+    return imageMetadata;
+  };
+
   // Register upload_and_resize_image tool (with forceImmediateResize=true)
   server.registerTool(
     "upload_and_resize_image",
@@ -606,106 +537,16 @@ async function main() {
           `upload_and_resize_image called with category: ${args.category}, filename: ${args.filename}`
         );
 
-        // Read the file
-        const fileBuffer = await readFile(args.filename);
-        const fileName = args.filename.split("/").pop() || "image";
-        log.debug(`Read file: ${fileName}, size: ${fileBuffer.length} bytes`);
-
-        // Create FormData for multipart upload
-        const formData = new FormData();
-        const blob = new Blob([fileBuffer], {
-          type: "application/octet-stream",
-        });
-        formData.append("image", blob, fileName);
-        log.debug(`Created FormData with file: ${fileName}`);
-
-        // Make the API call with forceImmediateResize=true
-        const response = await makeApiCall(
-          `/api/image/${args.category}?forceImmediateResize=true`,
-          {
-            method: "POST",
-            body: formData,
-          }
-        );
-
-        const responseText = await response.text();
-        log.debug(`Response body (raw): ${responseText.substring(0, 500)}`);
-
-        if (!response.ok) {
-          // Try to parse error response as JSON for better error messages
-          let errorMessage = responseText;
-          const contentType = response.headers.get("content-type") || "";
-
-          if (contentType.includes("application/json")) {
-            try {
-              const errorData = JSON.parse(responseText);
-              log.error(
-                `Failed to upload image: ${response.status}`,
-                errorData
-              );
-              errorMessage =
-                typeof errorData === "object" &&
-                errorData !== null &&
-                "error" in errorData
-                  ? JSON.stringify(errorData, null, 2)
-                  : responseText;
-            } catch (parseError) {
-              log.error(
-                `Failed to parse JSON error response: ${parseError}`,
-                responseText.substring(0, 500)
-              );
-            }
-          } else if (contentType.includes("text/html")) {
-            // Extract error message from HTML if possible
-            const errorMatch = responseText.match(/<pre>(.*?)<\/pre>/s);
-            if (errorMatch) {
-              const htmlError = errorMatch[1]
-                .replace(/<br\s*\/?>/g, "\n")
-                .replace(/&nbsp;/g, " ")
-                .replace(/&#39;/g, "'")
-                .trim();
-              log.error(
-                `Failed to upload image: ${response.status} (HTML response)`,
-                htmlError
-              );
-              errorMessage = `Server error: ${htmlError}`;
-            } else {
-              log.error(
-                `Failed to upload image: ${response.status} (HTML response)`,
-                responseText.substring(0, 500)
-              );
-              errorMessage = `Server returned HTML error page (${response.status})`;
-            }
-          } else {
-            log.error(
-              `Failed to upload image: ${response.status}`,
-              responseText.substring(0, 500)
-            );
-          }
-          throw new Error(
-            `Failed to upload image: ${response.status} ${errorMessage}`
-          );
-        }
-
-        let data: unknown;
-        try {
-          data = JSON.parse(responseText);
-          log.debug(`Parsed response data:`, data);
-        } catch (parseError) {
-          log.error(`Failed to parse JSON response: ${parseError}`);
-          log.error(`Response text was: ${responseText}`);
-          throw new Error(
-            `Invalid JSON response: ${responseText.substring(0, 200)}`
-          );
-        }
-
-        log.info(`Successfully uploaded image, response:`, data);
+        const metadata = await uploadImage(args.category, args.filename, true);
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(data, null, 2),
+              text: buildImageMetadataResponseText(
+                metadata,
+                "Image uploaded and resized"
+              ),
             },
           ],
         };
@@ -743,106 +584,13 @@ async function main() {
           `upload_image called with category: ${args.category}, filename: ${args.filename}`
         );
 
-        // Read the file
-        const fileBuffer = await readFile(args.filename);
-        const fileName = args.filename.split("/").pop() || "image";
-        log.debug(`Read file: ${fileName}, size: ${fileBuffer.length} bytes`);
-
-        // Create FormData for multipart upload
-        const formData = new FormData();
-        const blob = new Blob([fileBuffer], {
-          type: "application/octet-stream",
-        });
-        formData.append("image", blob, fileName);
-        log.debug(`Created FormData with file: ${fileName}`);
-
-        // Make the API call with forceImmediateResize=false
-        const response = await makeApiCall(
-          `/api/image/${args.category}?forceImmediateResize=false`,
-          {
-            method: "POST",
-            body: formData,
-          }
-        );
-
-        const responseText = await response.text();
-        log.debug(`Response body (raw): ${responseText.substring(0, 500)}`);
-
-        if (!response.ok) {
-          // Try to parse error response as JSON for better error messages
-          let errorMessage = responseText;
-          const contentType = response.headers.get("content-type") || "";
-
-          if (contentType.includes("application/json")) {
-            try {
-              const errorData = JSON.parse(responseText);
-              log.error(
-                `Failed to upload image: ${response.status}`,
-                errorData
-              );
-              errorMessage =
-                typeof errorData === "object" &&
-                errorData !== null &&
-                "error" in errorData
-                  ? JSON.stringify(errorData, null, 2)
-                  : responseText;
-            } catch (parseError) {
-              log.error(
-                `Failed to parse JSON error response: ${parseError}`,
-                responseText.substring(0, 500)
-              );
-            }
-          } else if (contentType.includes("text/html")) {
-            // Extract error message from HTML if possible
-            const errorMatch = responseText.match(/<pre>(.*?)<\/pre>/s);
-            if (errorMatch) {
-              const htmlError = errorMatch[1]
-                .replace(/<br\s*\/?>/g, "\n")
-                .replace(/&nbsp;/g, " ")
-                .replace(/&#39;/g, "'")
-                .trim();
-              log.error(
-                `Failed to upload image: ${response.status} (HTML response)`,
-                htmlError
-              );
-              errorMessage = `Server error: ${htmlError}`;
-            } else {
-              log.error(
-                `Failed to upload image: ${response.status} (HTML response)`,
-                responseText.substring(0, 500)
-              );
-              errorMessage = `Server returned HTML error page (${response.status})`;
-            }
-          } else {
-            log.error(
-              `Failed to upload image: ${response.status}`,
-              responseText.substring(0, 500)
-            );
-          }
-          throw new Error(
-            `Failed to upload image: ${response.status} ${errorMessage}`
-          );
-        }
-
-        let data: unknown;
-        try {
-          data = JSON.parse(responseText);
-          log.debug(`Parsed response data:`, data);
-        } catch (parseError) {
-          log.error(`Failed to parse JSON response: ${parseError}`);
-          log.error(`Response text was: ${responseText}`);
-          throw new Error(
-            `Invalid JSON response: ${responseText.substring(0, 200)}`
-          );
-        }
-
-        log.info(`Successfully uploaded image, response:`, data);
+        const metadata = await uploadImage(args.category, args.filename, false);
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(data, null, 2),
+              text: buildImageMetadataResponseText(metadata, "Image uploaded"),
             },
           ],
         };
