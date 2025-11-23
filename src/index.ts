@@ -103,8 +103,7 @@ async function main() {
   // Fetch and cache categories on startup
   const getCategories = async (): Promise<Category[] | null> => {
     try {
-      log.info("Loading size cache on startup...");
-      const response = await makeApiCall(`/api/size/list`);
+      const response = await makeApiCall(`/api/category/list`);
       if (!response.ok) {
         log.warn(
           `Failed to load size cache: ${response.status} ${response.statusText}`
