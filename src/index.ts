@@ -124,8 +124,8 @@ async function main() {
       log.info(
         `Size cache loaded: ${Object.keys(localSizeCache).length} sizes`
       );
-      sizeCache = localSizeCache;
-      lastUpdatedAt = Date.now();
+      _sizeCache = localSizeCache;
+      _sizeCacheLastUpdatedAt = Date.now();
       return categories;
     } catch (error) {
       log.warn(`Error loading size cache: ${error}`);
@@ -134,9 +134,8 @@ async function main() {
   };
 
   // Cache for categories (loaded on startup)
-  let sizeCache: Record<string, CategorySize> | undefined;
-  let lastUpdatedAt: number | undefined;
-  let lastAccessedAt: number | undefined;
+  let _sizeCache: Record<string, CategorySize> | undefined;
+  let _sizeCacheLastUpdatedAt: number = 0;
 
   // Internal method to get size cache with automatic refresh
   const getSizeCache = async (): Promise<
@@ -147,16 +146,14 @@ async function main() {
 
     // Check if cache is falsey or was last accessed more than 5 mins ago
     if (
-      !sizeCache ||
-      !lastAccessedAt ||
-      now - lastAccessedAt > fiveMinutesInMs
+      !_sizeCache ||
+      !_sizeCacheLastUpdatedAt ||
+      now - _sizeCacheLastUpdatedAt > fiveMinutesInMs
     ) {
       log.info("Size cache is stale or missing, reloading...");
       await getCategories();
     }
-
-    lastAccessedAt = Date.now();
-    return sizeCache;
+    return _sizeCache;
   };
 
   const buildImageMetadataResponseText = async (
