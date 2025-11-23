@@ -1,6 +1,6 @@
 {
   "name": "@hikari-systems/image-service-mcp",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "An Image Service MCP server",
   "type": "module",
   "main": "dist/index.js",
