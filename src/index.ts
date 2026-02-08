@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import { config } from "@hikari-systems/hs.utils";
-import { readFile } from "node:fs/promises";
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { config } from '@hikari-systems/hs.utils';
+import { readFile } from 'node:fs/promises';
 
 // Create a logger that writes to stderr instead of stdout
 // MCP servers must only output JSON-RPC messages to stdout
@@ -56,28 +56,122 @@ interface Category {
  */
 async function main() {
   // Get configuration values
-  const baseUrl = configString("image-service:url", process.argv?.[2] || "");
-  const apiKey = configString("image-service:apiKey", process.argv?.[3] || "");
+  const baseUrl = configString('image-service:url', process.argv?.[2] || '');
+  const apiKey = configString('image-service:apiKey', process.argv?.[3] || '');
 
-  if (baseUrl.trim() === "") {
+  if (baseUrl.trim() === '') {
     log.error(
-      "Usage: npx @hikari-systems/image-service-mcp <image-service-url> <image-service-api-key>"
+      'Usage: npx @hikari-systems/image-service-mcp <image-service-url> <image-service-api-key>'
     );
     process.exit(1);
   }
 
+  // Helper function to check if instructions are supported
+  // Most MCP clients will simply ignore unknown fields gracefully
+  const supportsInstructions = (): boolean => {
+    // For now, always return true as most clients handle unknown fields gracefully
+    // In the future, this could check client capabilities during handshake
+    return true;
+  };
+
+  const serverInfo: {
+    name: string;
+    version: string;
+    instructions?: string;
+  } = {
+    name: 'image-service-mcp',
+    version: '1.0.0',
+  };
+
+  // Only include instructions if client supports it
+  // (Most MCP clients will simply ignore unknown fields gracefully)
+  if (supportsInstructions()) {
+    serverInfo.instructions = `This MCP server provides tools for interacting with an image service API. Use these tools to upload images, retrieve image metadata, get resized image URLs, and manage image transcoding.
+
+## Available Tools
+
+### list_categories
+Lists all available image categories and their supported sizes. **Always call this first** when you need to:
+- Discover valid category names for uploading images
+- Find available size options (e.g., 'thumbnail', 'small', 'medium', 'large') for a specific category
+- Understand image dimensions and MIME types for each size
+
+### get_image_metadata
+Retrieves metadata for an image by its UUID (imageServiceId). Returns formatted markdown with:
+- Image ID and category
+- Available resized sizes with dimensions
+- Use this to check what sizes are available for an image before requesting a specific size
+
+### get_resized_image
+Gets a signed download URL for an image at a specific size. Requires:
+- imageServiceId: The image UUID
+- size: Must be a valid size name for the image's category (use list_categories to find valid sizes)
+
+**Important**: The returned URL is signed and may expire. Use it immediately or inform the user about expiration.
+
+### upload_image
+Uploads an image file without immediate resizing. The image will be transcoded/resized asynchronously. Use when:
+- You want faster upload response
+- Immediate resizing is not required
+- You'll check metadata later to see when resizing completes
+
+**Parameters**:
+- category: Must be a valid category name (use list_categories to verify)
+- filename: Local filesystem path to the image file
+
+### upload_and_resize_image
+Uploads an image file and immediately triggers resizing. Use when:
+- You need resized versions available immediately after upload
+- You want to ensure all sizes are ready before proceeding
+
+**Parameters**:
+- category: Must be a valid category name (use list_categories to verify)
+- filename: Local filesystem path to the image file
+
+### transcode_image
+Triggers transcoding/resizing for an already-uploaded image. Use when:
+- An image was uploaded without immediate resizing (upload_image)
+- You need to regenerate or update resized versions
+- The image metadata shows no resized files are available
+
+**Parameters**:
+- imageServiceId: The image UUID
+
+## Workflow Patterns
+
+### Uploading a New Image
+1. Call list_categories to find valid categories and sizes
+2. Choose an appropriate category for the image
+3. Use upload_and_resize_image if you need sizes immediately, or upload_image for faster upload
+4. Save the returned imageServiceId for future operations
+
+### Getting a Resized Image URL
+1. If you don't know the image's category, call get_image_metadata first
+2. Use list_categories to verify valid sizes for that category
+3. Call get_resized_image with the imageServiceId and desired size
+
+### Checking Image Status
+1. Call get_image_metadata with the imageServiceId
+2. Check the "Available Sizes" section to see which sizes are ready
+3. If sizes are missing, use transcode_image to trigger resizing
+
+## Important Notes
+
+- **Categories and Sizes**: Always verify category names and size options using list_categories before uploading or requesting resized images. Invalid categories or sizes will result in errors.
+
+- **File Paths**: The filename parameter must be a valid local filesystem path. The server reads the file directly from disk.
+
+- **Signed URLs**: URLs returned by get_resized_image are signed and may expire. They should be used promptly.
+
+- **Error Handling**: All tools return formatted error messages. Check the response for error details if operations fail.
+
+- **Response Format**: All tools return markdown-formatted responses designed for easy LLM parsing. Key information is clearly labeled and structured.`;
+  }
+
   // Create a new server instance
-  const server = new McpServer(
-    {
-      name: "image-service-mcp",
-      version: "1.0.0",
-    },
-    {
-      capabilities: {
-        tools: {},
-      },
-    }
-  );
+  const server = new McpServer(serverInfo, {
+    capabilities: { tools: {} },
+  });
 
   // Helper function to make API calls
   const makeApiCall = async (
@@ -86,11 +180,11 @@ async function main() {
   ): Promise<Response> => {
     const url = `${baseUrl}${endpoint}`;
     const headers = {
-      "X-API-Key": apiKey,
+      'X-API-Key': apiKey,
       ...options.headers,
     };
-    log.info(`Making API call: ${options.method || "GET"} ${url}`);
-    log.debug(`Request headers:`, { ...headers, "X-API-Key": "***" });
+    log.info(`Making API call: ${options.method || 'GET'} ${url}`);
+    log.debug(`Request headers:`, { ...headers, 'X-API-Key': '***' });
     const response = await fetch(url, { ...options, headers });
     log.info(`API response status: ${response.status} ${response.statusText}`);
     log.debug(
@@ -150,7 +244,7 @@ async function main() {
       !_sizeCacheLastUpdatedAt ||
       now - _sizeCacheLastUpdatedAt > fiveMinutesInMs
     ) {
-      log.info("Size cache is stale or missing, reloading...");
+      log.info('Size cache is stale or missing, reloading...');
       await getCategories();
     }
     return _sizeCache;
@@ -181,7 +275,7 @@ async function main() {
           formattedText += `- **${resizedFile.size}**\n`;
         }
       }
-      formattedText += "\n";
+      formattedText += '\n';
     } else {
       formattedText += `*Note: No resized files available for this image.*\n\n`;
     }
@@ -191,11 +285,11 @@ async function main() {
 
   // Register get_image_metadata tool
   server.registerTool(
-    "get_image_metadata",
+    'get_image_metadata',
     {
-      description: "Gets metadata for an image by its UUID",
+      description: 'Gets metadata for an image by its UUID',
       inputSchema: z.object({
-        imageServiceId: z.string().describe("The image service ID"),
+        imageServiceId: z.string().describe('The image service ID'),
       }),
     },
     async (args: { imageServiceId: string }) => {
@@ -213,13 +307,13 @@ async function main() {
         const metadata = (await response.json()) as ImageMetadata;
         const formattedText = await buildImageMetadataResponseText(
           metadata,
-          "Image Metadata"
+          'Image Metadata'
         );
 
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: formattedText,
             },
           ],
@@ -229,7 +323,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: `Error: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -243,12 +337,12 @@ async function main() {
 
   // Register transcode_image tool
   server.registerTool(
-    "transcode_image",
+    'transcode_image',
     {
       description:
-        "Transcodes an image by its UUID. This triggers the transcoding process and returns the updated image metadata.",
+        'Transcodes an image by its UUID. This triggers the transcoding process and returns the updated image metadata.',
       inputSchema: z.object({
-        imageServiceId: z.string().describe("The image service ID"),
+        imageServiceId: z.string().describe('The image service ID'),
       }),
     },
     async (args: { imageServiceId: string }) => {
@@ -257,7 +351,7 @@ async function main() {
         const response = await makeApiCall(
           `/api/image/${args.imageServiceId}/transcode`,
           {
-            method: "POST",
+            method: 'POST',
           }
         );
 
@@ -271,7 +365,7 @@ async function main() {
         const metadata = (await response.json()) as ImageMetadata;
 
         // Format the response in a more readable way for LLMs
-        let formattedText = "## Image Transcode Result\n\n";
+        let formattedText = '## Image Transcode Result\n\n';
 
         formattedText += `**Image ID:** ${metadata.id}\n\n`;
         formattedText += `**Category:** ${metadata.category}\n\n`;
@@ -291,7 +385,7 @@ async function main() {
               formattedText += `- **${resizedFile.size}**\n`;
             }
           }
-          formattedText += "\n";
+          formattedText += '\n';
         } else {
           formattedText += `*Note: No resized files available for this image.*\n\n`;
         }
@@ -299,7 +393,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: formattedText,
             },
           ],
@@ -309,7 +403,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: `Error: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -323,10 +417,10 @@ async function main() {
 
   // Register list_categories tool
   server.registerTool(
-    "list_categories",
+    'list_categories',
     {
       description:
-        "Lists all available image categories and their supported sizes. This helps determine what categories can be used when uploading images and what size options are available.",
+        'Lists all available image categories and their supported sizes. This helps determine what categories can be used when uploading images and what size options are available.',
       inputSchema: z.object({}),
     },
     async (): Promise<any> => {
@@ -337,40 +431,40 @@ async function main() {
           return {
             content: [
               {
-                type: "text",
-                text: "No categories are currently available.",
+                type: 'text',
+                text: 'No categories are currently available.',
               },
             ],
           };
         }
         let formattedText = `Found ${categories.length} categor${
-          categories.length === 1 ? "y" : "ies"
+          categories.length === 1 ? 'y' : 'ies'
         }:\n\n`;
 
         for (const category of categories) {
           if (category !== null) {
-            formattedText += `### ${category.name || "Unknown"}\n\n`;
+            formattedText += `### ${category.name || 'Unknown'}\n\n`;
 
             if (category.sizes.length > 0) {
               formattedText += `**Available Sizes:**\n\n`;
 
               for (const size of category.sizes) {
-                formattedText += `- **${size.name || "Unknown"}**: ${
-                  size.width || "?"
-                }×${size.height || "?"} pixels (${
-                  size.mimeType || "Unknown"
+                formattedText += `- **${size.name || 'Unknown'}**: ${
+                  size.width || '?'
+                }×${size.height || '?'} pixels (${
+                  size.mimeType || 'Unknown'
                 })\n`;
               }
-              formattedText += "\n";
+              formattedText += '\n';
             } else {
-              formattedText += "No sizes configured for this category.\n\n";
+              formattedText += 'No sizes configured for this category.\n\n';
             }
           }
 
           return {
             content: [
               {
-                type: "text",
+                type: 'text',
                 text: formattedText,
               },
             ],
@@ -381,7 +475,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: `Error: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -395,12 +489,12 @@ async function main() {
 
   // Register get_resized_image tool
   server.registerTool(
-    "get_resized_image",
+    'get_resized_image',
     {
       description:
-        "Gets a URL for downloading an image at a specific size. Returns a URL from which the image can be downloaded.",
+        'Gets a URL for downloading an image at a specific size. Returns a URL from which the image can be downloaded.',
       inputSchema: z.object({
-        imageServiceId: z.string().describe("The image service ID"),
+        imageServiceId: z.string().describe('The image service ID'),
         size: z
           .string()
           .describe(
@@ -428,10 +522,10 @@ async function main() {
 
         // Format the response in a more readable way for LLMs
         if (parsedResponse && parsedResponse.url) {
-          log.info(`Extracted URL: ${parsedResponse.url || "null"}`);
+          log.info(`Extracted URL: ${parsedResponse.url || 'null'}`);
 
           if (parsedResponse.url) {
-            let formattedText = "## Resized Image URL\n\n";
+            let formattedText = '## Resized Image URL\n\n';
             formattedText += `**Image UUID:** ${args.imageServiceId}\n\n`;
             formattedText += `**Requested Size:** ${args.size}\n\n`;
             formattedText += `**Download URL:** ${parsedResponse.url}\n\n`;
@@ -440,7 +534,7 @@ async function main() {
             return {
               content: [
                 {
-                  type: "text",
+                  type: 'text',
                   text: formattedText,
                 },
               ],
@@ -450,7 +544,7 @@ async function main() {
           return {
             content: [
               {
-                type: "text",
+                type: 'text',
                 text: `## Resized Image URL\n\n**Warning:** No URL found in the response.\n\n**Image UUID:** ${
                   args.imageServiceId
                 }\n**Requested Size:** ${
@@ -469,7 +563,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: JSON.stringify(parsedResponse, null, 2),
             },
           ],
@@ -479,7 +573,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: `Error: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -499,22 +593,22 @@ async function main() {
   ): Promise<ImageMetadata> => {
     // Read the file
     const fileBuffer = await readFile(filename);
-    const fileName = filename.split("/").pop() || "image";
+    const fileName = filename.split('/').pop() || 'image';
     log.debug(`Read file: ${fileName}, size: ${fileBuffer.length} bytes`);
 
     // Create FormData for multipart upload
     const formData = new FormData();
     const blob = new Blob([fileBuffer], {
-      type: "application/octet-stream",
+      type: 'application/octet-stream',
     });
-    formData.append("image", blob, fileName);
+    formData.append('image', blob, fileName);
     log.debug(`Created FormData with file: ${fileName}`);
 
     // Make the API call
     const response = await makeApiCall(
       `/api/image/${category}?forceImmediateResize=${resize}`,
       {
-        method: "POST",
+        method: 'POST',
         body: formData,
       }
     );
@@ -542,13 +636,13 @@ async function main() {
 
   // Register upload_and_resize_image tool (with forceImmediateResize=true)
   server.registerTool(
-    "upload_and_resize_image",
+    'upload_and_resize_image',
     {
       description:
-        "Uploads an image file and immediately resizes it. Takes an image category and a local filename, reads the file, and uploads it to the image service with forceImmediateResize set to true.",
+        'Uploads an image file and immediately resizes it. Takes an image category and a local filename, reads the file, and uploads it to the image service with forceImmediateResize set to true.',
       inputSchema: z.object({
-        category: z.string().describe("The image category"),
-        filename: z.string().describe("The local file path to upload"),
+        category: z.string().describe('The image category'),
+        filename: z.string().describe('The local file path to upload'),
       }),
     },
     async (args) => {
@@ -562,10 +656,10 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: await buildImageMetadataResponseText(
                 metadata,
-                "Image uploaded and resized"
+                'Image uploaded and resized'
               ),
             },
           ],
@@ -575,7 +669,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: `Error: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -589,13 +683,13 @@ async function main() {
 
   // Register upload_image tool (with forceImmediateResize=false)
   server.registerTool(
-    "upload_image",
+    'upload_image',
     {
       description:
-        "Uploads an image file without immediate resizing. Takes an image category and a local filename, reads the file, and uploads it to the image service with forceImmediateResize set to false.",
+        'Uploads an image file without immediate resizing. Takes an image category and a local filename, reads the file, and uploads it to the image service with forceImmediateResize set to false.',
       inputSchema: z.object({
-        category: z.string().describe("The image category"),
-        filename: z.string().describe("The local file path to upload"),
+        category: z.string().describe('The image category'),
+        filename: z.string().describe('The local file path to upload'),
       }),
     },
     async (args) => {
@@ -609,10 +703,10 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: await buildImageMetadataResponseText(
                 metadata,
-                "Image uploaded"
+                'Image uploaded'
               ),
             },
           ],
@@ -622,7 +716,7 @@ async function main() {
         return {
           content: [
             {
-              type: "text",
+              type: 'text',
               text: `Error: ${
                 error instanceof Error ? error.message : String(error)
               }`,
@@ -638,12 +732,12 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  log.info("Image Service MCP server running on stdio");
+  log.info('Image Service MCP server running on stdio');
   log.info(`Base URL: ${baseUrl}`);
   log.info(`API Key: ${apiKey.substring(0, 8)}...`);
 }
 
 main().catch((error) => {
-  log.error("Fatal error", error);
+  log.error('Fatal error', error);
   process.exit(1);
 });

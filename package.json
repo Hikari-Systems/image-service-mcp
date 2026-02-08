@@ -20,7 +20,7 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "@hikari-systems/hs.utils": "^0.0.56",
+    "@hikari-systems/hs.utils": "^0.0.58",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
